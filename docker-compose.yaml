@@ -1,0 +1,104 @@
+# hulibaza MVP local stack. Own ports/volumes/creds so it never collides with
+# the prototype (5993x) or anything already on 5432.
+#
+#   Postgres  -> localhost:59942   (user/pass/db = hulibaza)
+#   Qdrant    -> localhost:59943   (REST/gRPC 6333)
+#   llama     -> localhost:59944   (optional, GPU; start only when you have models)
+#
+# Bring up the data stores:   docker compose up -d postgres qdrant
+
+name: hulibaza-mvp
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.14.0
+    restart: unless-stopped
+    ports:
+      - "59943:6333"
+    volumes:
+      - ./qdrant_data:/qdrant/storage
+    # Qdrant + RocksDB open many files per segment; the 1024 default causes
+    # "Too many open files" as collections grow.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 524288
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:17.9-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hulibaza
+      POSTGRES_PASSWORD: hulibaza
+      POSTGRES_DB: hulibaza
+    ports:
+      - "59942:5432"
+    volumes:
+      - ./pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hulibaza"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # The hulibaza MCP server (streamable-HTTP). Needs a reachable embedder, so it
+  # is behind the "server" profile — start it with:
+  #   docker compose --profile server up -d hulibaza
+  # after config.yaml, ./tokenizers/, and a wiki dir are in place.
+  hulibaza:
+    build: .
+    restart: unless-stopped
+#     profiles: ["server"]
+    ports:
+      - "59980:8080"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./tokenizers:/app/tokenizers:ro
+      - ./wiki:/data/docs:ro            # each subdir with a section.yaml = a section
+    environment:
+      - CONFIG_PATH=/app/config.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+
+  # Embedding server: multi-model llama.cpp router (OpenAI-compatible
+  # /v1/embeddings). GPU + local model files required, so it is NOT started by
+  # default. Provide ./llama_server/models + models.ini and start it explicitly
+  # (docker compose up -d llama-server) once you have models on disk.
+  llama-server:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda12-b9294
+    restart: unless-stopped
+#     profiles: ["gpu"]           # excluded from the default `up`
+    ports:
+      - "59944:8080"
+    volumes:
+      - ./llama_server/models:/models:ro
+      - ./llama_server/models.ini:/models.ini:ro
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    ulimits:
+      memlock: -1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+    command:
+      - --models-preset
+      - /models.ini
+      - --models-max
+      - "99"
+      - --models-autoload
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"

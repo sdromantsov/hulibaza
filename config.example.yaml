@@ -1,0 +1,38 @@
+# hulibaza MVP config example. Copy to config.yaml and edit.
+# Path is read from CONFIG_PATH (defaults to ./config.yaml).
+#
+# URLs below use the compose SERVICE names (valid inside the compose network).
+# To run the server on the HOST against the compose stack instead, use
+# localhost with the mapped ports: postgres 59942, qdrant 59943, llama 59944.
+
+embedding_url: "http://llama-server:8080"   # any OpenAI-compatible /v1/embeddings
+embedding_timeout: 600
+qdrant_url: "http://qdrant:6333"
+postgres_url: "postgresql://hulibaza:hulibaza@postgres:5432/hulibaza"
+wiki_dir: "/data/docs"                       # each subdir with a section.yaml = a section
+
+# Global file-gating & lifecycle knobs (all optional; defaults shown).
+size_cap_text_bytes: 10485760   # 10 MB — whitelisted text (.hulibazaallow)
+size_cap_other_bytes: 1048576   # 1 MB — unknown-extension files
+deletion_grace_days: 7
+daemon_enabled: true
+daemon_poll_seconds: 60
+
+# Embedding model registry. Each model needs a local tokenizer.json (token
+# counts are computed locally — no HTTP tokenization). A section.yaml may only
+# reference a model declared here. embed_batch_size is per-model (VRAM-bound).
+models:
+  qwen3-embed-4b:
+    max_context: 2048
+    tokenizer_path: /app/tokenizers/qwen3-embed-4b.json
+    embed_batch_size: 16
+  nomic-v2-moe:
+    max_context: 512
+    tokenizer_path: /app/tokenizers/nomic-v2-moe.json
+    embed_batch_size: 32
+
+defaults:
+  embed_model: "nomic-v2-moe"
+  chunk_size: 500                 # tokens; must be <= max_context × (1 − headroom)
+  chunk_overlap_ratio: 0.1
+  headroom_ratio: 0.02

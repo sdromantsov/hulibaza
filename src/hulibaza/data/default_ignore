@@ -1,0 +1,58 @@
+# hulibaza — shipped default ignore (the built-in .hulibazaignore).
+#
+# gitignore-style globs. A per-section .hulibazaignore EXTENDS this list;
+# `!pattern` re-includes; ignore always wins over .hulibazaallow on overlap.
+# Trailing "/" matches directories only.
+#
+# ".*/" prunes every hidden directory at any depth (.git, .venv, .idea,
+# .github, .pytest_cache, ...). Re-include one with e.g. "!.github/" in a
+# section .hulibazaignore.
+
+# ── hidden directories (VCS / tool caches / IDE) ──
+.*/
+
+# ── control & secret files (never index) ──
+.hulibazaignore
+.hulibazaallow
+section.yaml
+.env
+.env.*
+.DS_Store
+*.pem
+*.key
+
+# ── version control (non-hidden) ──
+CVS/
+_darcs/
+RCS/
+SCCS/
+
+# ── language deps / build output (non-hidden) ──
+node_modules/
+bower_components/
+jspm_packages/
+vendor/
+venv/
+env/
+virtualenv/
+__pycache__/
+dist/
+build/
+_build/
+out/
+target/
+bin/
+obj/
+site-packages/
+Pods/
+Carthage/
+
+# ── caches / coverage / logs ──
+htmlcov/
+coverage/
+.sass-cache/
+
+# ── OS junk ──
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/

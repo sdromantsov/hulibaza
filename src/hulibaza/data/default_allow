@@ -1,0 +1,197 @@
+# hulibaza — shipped default allow (the built-in .hulibazaallow).
+#
+# Extensions treated as KNOWN TEXT: parsed as UTF-8 and given the larger
+# size_cap_text_bytes instead of the small "other" cap. One extension per
+# line, leading dot, case-insensitive; `#` comments. A per-section
+# .hulibazaallow EXTENDS this list.
+#
+# Curation rule: ONLY extensions that are unambiguously text. Anything that
+# also names a common BINARY format is deliberately EXCLUDED and handled via
+# the sniffed "other" tier — e.g. .ts (MPEG transport stream), .doc/.docx and
+# other office formats, .dat, .bin, media/image formats. .pdf is handled
+# separately as a known-binary format with a dedicated parser.
+
+# ── prose / markup ──
+.txt
+.text
+.md
+.markdown
+.mdown
+.mkd
+.mkdn
+.mdx
+.rst
+.org
+.adoc
+.asciidoc
+.textile
+.pod
+.tex
+.latex
+.ltx
+.bib
+
+# ── web / xml-family (text) ──
+.html
+.htm
+.xhtml
+.xml
+.xsl
+.xslt
+.svg
+.rss
+.atom
+.vue
+.svelte
+.astro
+
+# ── data / config (text) ──
+.json
+.json5
+.jsonl
+.ndjson
+.geojson
+.yaml
+.yml
+.toml
+.ini
+.cfg
+.conf
+.config
+.properties
+.csv
+.tsv
+.editorconfig
+.gitattributes
+.tf
+.tfvars
+.hcl
+.proto
+.graphql
+.gql
+
+# ── shell / scripting ──
+.sh
+.bash
+.zsh
+.fish
+.ps1
+.psm1
+.bat
+.cmd
+.awk
+.sed
+
+# ── python ──
+.py
+.pyi
+.pyx
+.pxd
+
+# ── javascript / typescript (.ts excluded = MPEG-TS collision) ──
+.js
+.mjs
+.cjs
+.jsx
+.tsx
+.mts
+.cts
+.coffee
+
+# ── web styles ──
+.css
+.scss
+.sass
+.less
+.styl
+
+# ── jvm ──
+.java
+.kt
+.kts
+.scala
+.sc
+.groovy
+.gradle
+.clj
+.cljs
+.cljc
+.edn
+
+# ── c-family ──
+.c
+.h
+.cc
+.cpp
+.cxx
+.hpp
+.hh
+.hxx
+.cs
+.m
+.mm
+
+# ── systems / other languages ──
+.go
+.rs
+.rb
+.rake
+.gemspec
+.php
+.swift
+.pl
+.pm
+.lua
+.tcl
+.r
+.jl
+.dart
+.ex
+.exs
+.erl
+.hrl
+.hs
+.lhs
+.elm
+.ml
+.mli
+.fs
+.fsx
+.nim
+.cr
+.zig
+.d
+.v
+.sv
+.vhd
+.vhdl
+.f
+.f90
+.f95
+.for
+.pas
+.pp
+.ada
+.adb
+.ads
+.asm
+.s
+
+# ── lisp-family / editors ──
+.el
+.lisp
+.lsp
+.scm
+.rkt
+.vim
+
+# ── build / infra / query ──
+.sql
+.ddl
+.cmake
+.mk
+.bzl
+.bazel
+.nix
+.dockerfile
+.containerfile
