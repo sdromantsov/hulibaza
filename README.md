@@ -54,19 +54,22 @@ Prereqs: Docker + Compose. A GPU is recommended for a local embedder, or point
 `embedding_url` at any hosted OpenAI-compatible embeddings API.
 
 1. **Config** — `cp config.example.yaml config.yaml`, edit the model registry.
-2. **Tokenizers** — drop each model's `tokenizer.json` in `./tokenizers/`
-   (token counts are computed locally — no network tokenization).
-3. **Embedder** — put GGUF models + a `models.ini` in `./llama_server/`, or set
-   `embedding_url` to a remote endpoint and skip the `gpu` profile below.
-4. **Sections** — put document collections under `./wiki/<name>/`, each with a
+2. **Models + tokenizers** — `./scripts/fetch-models.sh` downloads the GGUF
+   weights (`./llama_server/models/`) and the `tokenizer.json` files
+   (`./tokenizers/`, used for local token counting) from their official
+   HuggingFace repos, checksum-verified. Not committed — they exceed GitHub's
+   size limit. Provenance + licenses: [docs/MODELS.md](docs/MODELS.md). To use a
+   remote embedder instead, point `embedding_url` at any OpenAI-compatible
+   `/v1/embeddings` endpoint and skip the `gpu` profile below.
+3. **Sections** — put document collections under `./wiki/<name>/`, each with a
    `section.yaml`.
-5. **Run:**
+4. **Run:**
    ```bash
    docker compose up -d postgres qdrant
    docker compose --profile gpu up -d llama-server     # local embedder (optional)
    docker compose --profile server up -d hulibaza      # MCP server on :59980
    ```
-6. Point your MCP client at `http://localhost:59980/mcp`, `ingest()` a section,
+5. Point your MCP client at `http://localhost:59980/mcp`, `ingest()` a section,
    then `search()` it.
 
 Full deploy notes: [docs/RUNNING.md](docs/RUNNING.md).
