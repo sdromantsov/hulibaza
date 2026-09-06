@@ -23,27 +23,27 @@ Postgres `59942`, Qdrant `59943`, embedder `59944`, server `59980`.
 2. **Config** — `cp config.example.yaml config.yaml`, edit URLs / `models` / `defaults`.
 3. **Tokenizers** — put each model's `tokenizer.json` in `./tokenizers/` (paths
    must match `models[*].tokenizer_path`). Token counts are computed locally.
-4. **Wiki** — put sections under `./wiki/`; each section is a subdirectory with a
-   `section.yaml`. Optional per-section `.hulibazaignore` / `.hulibazaallow`
-   extend the shipped defaults.
-5. **Embedder** — start the GPU router (`docker compose --profile gpu up -d
-   llama-server`) with models in `./llama_server/`, or point `embedding_url` at
-   any OpenAI-compatible `/v1/embeddings` server.
+4. **Wiki** — put sections under `wiki_dir` (default `/data/docs`, mounted
+   from the host); each section is a subdirectory with a `section.yaml`.
+   Optional per-section `.hulibazaignore` / `.hulibazaallow` extend the shipped
+   defaults.
+5. **Embedder + reranker** — start the GPU router (`docker compose up -d
+   llama-server`) with models in `./llama_server/`; it serves both
+   `/v1/embeddings` and `/v1/rerank` (the reranker section in `models.ini` uses
+   `reranking = true`). Or point `embedding_url` at any OpenAI-compatible
+   server that implements both endpoints.
 
-   > **Sizing the embedder for concurrency.** llama.cpp uses a *unified* KV
-   > cache: the sum of all concurrently-decoded sequences must fit in
-   > `ctx-size`. With `parallel = P` slots, that means **`ctx-size >= P ×
-   > max_chunk_tokens`** (+ margin for special/EOS tokens). If it's too small,
-   > concurrent sections — or even one section's batched request, which fans
-   > out across all P slots — overflow with HTTP 500 *"Context size has been
-   > exceeded"* and the whole file is dropped. The router auto-picks `P = 4`,
-   > so a model serving 1024-token chunks needs `ctx-size` ~4096, or pin
-   > `parallel = 2` and `ctx-size = 3072` (what this repo's `models.ini` uses).
-   > This is independent of the model's native context — a chunk still must be
-   > `<= ctx-size / parallel`.
-6. **Server** — `docker compose --profile server up -d hulibaza`
-   (streamable-HTTP MCP on `59980`). It builds the manager and starts the
-   lifecycle daemon; ingestion is never auto-started.
+   > **Sizing.** llama.cpp pre-allocates a KV cache for `ctx-size` tokens and
+   > activation buffers for `ubatch-size`, both up front. Pooling models
+   > (embedding/rerank) process one whole input per forward pass, so both must
+   > be >= your longest input — this repo pins `parallel = 1` and
+   > `ctx-size = ubatch-size = 1024` in `models.ini`. A too-small `ubatch-size`
+   > rejects long inputs (*"input (N tokens) is too large to process"*); a
+   > too-small `ctx-size` fails requests (*"Context size has been exceeded"*).
+   > `batch-size` is logical (near-free); keep it >= `ubatch-size`.
+6. **Server** — `docker compose up -d hulibaza` (streamable-HTTP MCP on
+   `59980`). It builds the manager and starts the lifecycle daemon; ingestion
+   is never auto-started.
 
 To run the server on the host instead of in compose, set the URLs in
 `config.yaml` to `localhost` with the mapped ports and run

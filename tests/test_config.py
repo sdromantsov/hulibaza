@@ -8,6 +8,7 @@ from hulibaza.config import (
     Defaults,
     GlobalConfig,
     ModelSpec,
+    RerankerSpec,
     ResolvedSectionConfig,
     SectionConfig,
     discover_sections,
@@ -43,6 +44,27 @@ def test_modelspec_defaults_batch_16(tokenizer_file):
 def test_modelspec_max_context_bounds(tokenizer_file):
     with pytest.raises(ValidationError):
         ModelSpec(max_context=8, tokenizer_path=tokenizer_file)  # < 32
+
+
+# ── RerankerSpec ──
+
+
+def test_rerankerspec_defaults():
+    spec = RerankerSpec()
+    assert spec.kind == "endpoint"
+    assert spec.batch_size == 16
+
+
+def test_rerankerspec_kind_literal():
+    with pytest.raises(ValidationError):
+        RerankerSpec(kind="bogus")
+
+
+def test_rerankerspec_batch_bounds():
+    with pytest.raises(ValidationError):
+        RerankerSpec(batch_size=0)  # < 1
+    with pytest.raises(ValidationError):
+        RerankerSpec(batch_size=257)  # > 256
 
 
 # ── GlobalConfig ──
@@ -90,6 +112,32 @@ def test_global_valid_with_registry(tokenizer_file):
         defaults=Defaults(embed_model="m", chunk_size=512),
     )
     assert cfg.defaults.embed_model == "m"
+
+
+def test_global_reranker_defaults():
+    cfg = GlobalConfig()
+    assert cfg.rerankers == {}
+    assert cfg.defaults.reranker is None
+    assert cfg.defaults.rerank_pool_size == 20
+
+
+def test_global_reranker_must_be_in_registry():
+    # Validated even with an empty model registry (independent early-skip).
+    with pytest.raises(ValidationError, match="rerankers registry"):
+        GlobalConfig(defaults=Defaults(reranker="ghost"))
+
+
+def test_global_reranker_declared_ok():
+    cfg = GlobalConfig(
+        rerankers={"rr": RerankerSpec()},
+        defaults=Defaults(reranker="rr"),
+    )
+    assert cfg.defaults.reranker == "rr"
+
+
+def test_global_rerank_pool_size_bounds():
+    with pytest.raises(ValidationError):
+        GlobalConfig(defaults=Defaults(rerank_pool_size=0))  # < 1
 
 
 # ── resolve_section_config ──

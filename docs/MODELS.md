@@ -2,13 +2,15 @@
 
 hulibaza needs two things at runtime that are **not** in this repository:
 
-- **GGUF embedding weights** — served by the llama.cpp router (`llama_server/`).
+- **GGUF weights** — embedding + reranker models, served by the llama.cpp
+  router (`llama_server/`).
 - **`tokenizer.json` files** — used for *local* token counting (`tokenizers/`),
   so chunk sizes match what the embedder actually sees.
 
-They aren't committed because the weights (325 MB + 2.5 GB) exceed GitHub's
-100 MB per-file limit, and every file is Apache-2.0 and freely downloadable from
-its official HuggingFace repo. `llama_server/` and `tokenizers/` are gitignored.
+They aren't committed because the weights (333 MB + 639 MB) exceed
+GitHub's 100 MB per-file limit, and every file is freely downloadable from its
+official HuggingFace repo (licenses per model, below). `llama_server/` and
+`tokenizers/` are gitignored.
 
 ## Get them
 
@@ -22,36 +24,39 @@ stack up (see [RUNNING.md](RUNNING.md)).
 
 ## Provenance
 
-Everything below is **Apache-2.0**.
-
 ### Weights → `llama_server/models/`
 
-| Local file | Source repo | Quant | Size |
-|---|---|---|---|
-| `nomic-embed-text-v2-moe.Q4_K_S.gguf` | [nomic-ai/nomic-embed-text-v2-moe-GGUF](https://huggingface.co/nomic-ai/nomic-embed-text-v2-moe-GGUF) | Q4_K_S | 325 MB |
-| `Qwen3-Embedding-4B-Q4_K_M.gguf` | [Qwen/Qwen3-Embedding-4B-GGUF](https://huggingface.co/Qwen/Qwen3-Embedding-4B-GGUF) | Q4_K_M | 2.5 GB |
+| Local file | Source repo | Quant | Size | License |
+|---|---|---|---|---|
+| `embeddinggemma-300M-Q8_0.gguf` | [unsloth/embeddinggemma-300m-GGUF](https://huggingface.co/unsloth/embeddinggemma-300m-GGUF) | Q8_0 | 333 MB | [Gemma terms](https://ai.google.dev/gemma/terms) |
+| `qwen3-reranker-0.6b-q8_0.gguf` | [ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF](https://huggingface.co/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF) | Q8_0 | 639 MB | Apache-2.0 |
+
+The reranker is a **species-2** model (causal LM judging yes/no relevance); the
+ggml-org conversion bakes the 2-row classifier head + `rerank` template into the
+GGUF, so llama.cpp's `--reranking` (router ini key `reranking = true`) serves it
+at `/v1/rerank` with P(yes) scores. Requires llama.cpp ≥ v0.4.0-era builds
+(`server-cuda12-b10818` pinned in `docker-compose.yaml`).
 
 ### Tokenizers → `tokenizers/`
 
 Each is the model repo's `tokenizer.json`, renamed to the id `config.yaml` uses.
+Rerankers need no local tokenizer (documents are already chunked; rerank batches
+are per-document, not per-token).
 
 | Local file | Source repo → file |
 |---|---|
-| `nomic-v2-moe.json` | [nomic-ai/nomic-embed-text-v2-moe](https://huggingface.co/nomic-ai/nomic-embed-text-v2-moe) → `tokenizer.json` |
-| `qwen3-embed-4b.json` | [Qwen/Qwen3-Embedding-4B](https://huggingface.co/Qwen/Qwen3-Embedding-4B) → `tokenizer.json` |
+| `embeddinggemma-300m.json` | [unsloth/embeddinggemma-300m](https://huggingface.co/unsloth/embeddinggemma-300m) → `tokenizer.json` (mirror of the [gated](https://huggingface.co/google/embeddinggemma-300m) google repo) |
 
 > The tokenizer must come from the **base model** repo (not the GGUF repo) and
 > match the served weights — the whole point is that local token counts equal
-> the embedder's. Underlying models: nomic `nomic-bert-moe`, 8×277M MoE, native
-> ctx 512, dim 768 · Qwen3 4B, ctx 40960, dim 2560.
+> the embedder's. EmbeddingGemma: `gemma-3-270m` family, ctx 2048, dim 768.
 
 ## Integrity (sha256)
 
 ```
-db0608a87a2daf4a52b74912dd678ca6122db26d971bdfcf16d3b11b77047663  nomic-embed-text-v2-moe.Q4_K_S.gguf
-2b0cf8f17b4c723c27303015383c27ec4bf2d8314bb677d05e920dd70bb0f16b  Qwen3-Embedding-4B-Q4_K_M.gguf
-3a56def25aa40facc030ea8b0b87f3688e4b3c39eb8b45d5702b3a1300fe2a20  nomic-v2-moe.json
-83cdf8c3a34f68862319cb1810ee7b1e2c0a44e0864ae930194ddb76bb7feb8d  qwen3-embed-4b.json
+a0f7b4e13c397a6e1b32c2de75b1f65a14c92ec524d5f674d94a4290a1c4969b  embeddinggemma-300M-Q8_0.gguf
+22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48  qwen3-reranker-0.6b-q8_0.gguf
+6852f8d561078cc0cebe70ca03c5bfdd0d60a45f9d2e0e1e4cc05b68e9ec329e  embeddinggemma-300m.json
 ```
 
 ## Notes
@@ -60,6 +65,9 @@ db0608a87a2daf4a52b74912dd678ca6122db26d971bdfcf16d3b11b77047663  nomic-embed-te
   replace `main` with a commit revision in the `resolve/<rev>/` URL.
 - **Swapping models:** any OpenAI-compatible `/v1/embeddings` endpoint works —
   point `embedding_url` elsewhere and adjust the `models` registry + tokenizers
-  in `config.yaml`. You are not tied to these two.
-- **`nomic-v1.json`** (nomic-embed-text-v1 WordPiece tokenizer) is a leftover
-  from earlier experiments and is not referenced by any config — safe to ignore.
+  in `config.yaml`. Rerankers need any `/v1/rerank` implementation (Jina/TEI
+  format: `query` + `documents` → `relevance_score`); the same URL serves both
+  when it's the llama.cpp router. You are not tied to these models.
+- **`qwen3-embed-4b.json`** is a leftover from an earlier experiment (after
+  Qwen3-Embedding-4B left the stack); it is not referenced by any config —
+  safe to ignore or delete.

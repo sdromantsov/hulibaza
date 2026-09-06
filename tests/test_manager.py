@@ -8,11 +8,12 @@ import psycopg
 import pytest
 from qdrant_client import AsyncQdrantClient
 
-from hulibaza.config import Defaults, GlobalConfig, ModelSpec
+from hulibaza.config import Defaults, GlobalConfig, ModelSpec, RerankerSpec
 from hulibaza.embedding_client import EmbeddingError
 from hulibaza.ingest import Ingestor
 from hulibaza.manager import HulibazaManager
 from hulibaza.qdrant_store import QdrantStore
+from hulibaza.rerank_client import RerankError
 from hulibaza.state import StateStore
 
 pytestmark = pytest.mark.integration
@@ -75,6 +76,57 @@ async def env(clean_pg, tmp_path):
     mgr = HulibazaManager(config, embedder, qdrant, state, ingestor,
                           get_token_counter=lambda model: len)
     yield mgr, docs, state, embedder
+    await qdrant.aclose()
+
+
+class FakeReranker:
+    def __init__(self, scorer=None, fail=False, available=True):
+        # Default: later document scores higher, so reranking visibly reorders.
+        self.scorer = scorer or (lambda docs: [(i, float(len(docs) - i)) for i in range(len(docs))])
+        self.fail = fail
+        self.available = available
+        self.calls = []
+
+    async def is_model_available(self, model):
+        return self.available
+
+    async def rerank(self, model, query, documents, top_n=None):
+        self.calls.append(list(documents))
+        if self.fail:
+            raise RerankError("reranker down")
+        return self.scorer(documents)
+
+    async def health_check(self):
+        return not self.fail
+
+
+@pytest.fixture
+async def rerank_env(clean_pg, tmp_path):
+    """Same setup as `env` but with a reranker configured (pool floor 20)."""
+    tok = tmp_path / "tok.json"
+    tok.write_text("{}")
+    wiki = tmp_path / "wiki"
+    docs = wiki / "docs"
+    docs.mkdir(parents=True)
+    (docs / "section.yaml").write_text("description: Docs\nchunk_size: 50\n")
+    (docs / "cuda.md").write_text("cudamalloc allocates device memory")
+    (docs / "kin.md").write_text("kinematics solver allocates robot arms")
+
+    config = GlobalConfig(
+        wiki_dir=str(wiki),
+        models={"m": ModelSpec(max_context=2048, tokenizer_path=str(tok))},
+        rerankers={"rr": RerankerSpec(batch_size=2)},
+        defaults=Defaults(embed_model="m", chunk_size=50, reranker="rr", rerank_pool_size=20),
+    )
+    state = StateStore(PG_URL)
+    await state.init_schema()
+    qdrant = QdrantStore(client=AsyncQdrantClient(location=":memory:"))
+    embedder = FakeEmbedder()
+    ingestor = Ingestor(state, qdrant, embedder, deletion_grace_days=7)
+    reranker = FakeReranker()
+    mgr = HulibazaManager(config, embedder, qdrant, state, ingestor,
+                          get_token_counter=lambda model: len, reranker=reranker)
+    yield mgr, docs, state, reranker
     await qdrant.aclose()
 
 
@@ -215,3 +267,106 @@ async def test_unhealthy_model_blocks_dense_preflight(env):
     assert "unhealthy" in hybrid["error"] and "keyword" in hybrid["error"]
     kw = await mgr.search("docs", "cudamalloc", mode="keyword")
     assert kw["results"]  # keyword unaffected by model health
+
+
+# ── rerank ──
+
+
+async def test_rerank_reorders_and_scores(rerank_env):
+    mgr, docs, _, reranker = rerank_env
+    await _ingest(mgr)
+    # Query matches both files; the fake scorer ranks the later doc highest.
+    r = await mgr.search("docs", "allocates", mode="keyword", top_k=2)
+    assert len(r["results"]) == 2
+    assert r["results"][0]["source_file"] == "kin.md"
+    assert r["results"][0]["relevance_score"] == 2.0
+    assert r["results"][1]["source_file"] == "cuda.md"
+    assert r["results"][1]["relevance_score"] == 1.0
+    # The retrieval score is preserved alongside the rerank score.
+    assert r["results"][0]["score"] is not None
+    assert len(reranker.calls) == 1
+
+
+async def test_rerank_pool_floor_sent_to_qdrant(rerank_env):
+    mgr, *_ = rerank_env
+    await _ingest(mgr)
+    limits = []
+    orig = mgr.qdrant.keyword_search
+
+    async def spy(collection, sparse, limit=3):
+        limits.append(limit)
+        return await orig(collection, sparse, limit=limit)
+
+    mgr.qdrant.keyword_search = spy
+    await mgr.search("docs", "allocates", mode="keyword", top_k=2)
+    assert limits == [20]  # pool = max(top_k=2, rerank_pool_size=20)
+
+
+async def test_no_reranker_uses_top_k_pool_and_null_scores(env):
+    mgr, *_ = env
+    await _ingest(mgr)
+    limits = []
+    orig = mgr.qdrant.keyword_search
+
+    async def spy(collection, sparse, limit=3):
+        limits.append(limit)
+        return await orig(collection, sparse, limit=limit)
+
+    mgr.qdrant.keyword_search = spy
+    r = await mgr.search("docs", "cudamalloc", mode="keyword", top_k=3)
+    assert limits == [3]  # no reranker configured -> pool = top_k
+    assert all(x["relevance_score"] is None for x in r["results"])
+
+
+async def test_rerank_failure_degrades_to_retrieval_order(rerank_env):
+    mgr, *_ = rerank_env
+    await _ingest(mgr)
+    r = await mgr.search("docs", "allocates", mode="keyword", top_k=2)
+    assert r["results"][0]["source_file"] == "kin.md"  # reranked order
+    mgr.reranker.fail = True
+    r = await mgr.search("docs", "allocates", mode="keyword", top_k=2)
+    assert "results" in r and "warnings" in r
+    assert any("reranking with 'rr' failed" in w for w in r["warnings"])
+    assert all(x["relevance_score"] is None for x in r["results"])
+
+
+async def test_rerank_model_not_listed_degrades(rerank_env):
+    mgr, *_ = rerank_env
+    await _ingest(mgr)
+    mgr.reranker.available = False
+    r = await mgr.search("docs", "allocates", mode="keyword", top_k=2)
+    assert "results" in r and "warnings" in r
+    assert any("not listed" in w for w in r["warnings"])
+    assert all(x["relevance_score"] is None for x in r["results"])
+
+
+async def test_rerank_pool_batches_and_unscored_tail(rerank_env):
+    mgr, *_ = rerank_env
+
+    class R:
+        def __init__(self, i):
+            self.text = f"t{i}"
+
+    results = [R(i) for i in range(5)]
+    warnings = []
+    positions, scores = await mgr._rerank_pool("rr", "q", results, warnings)
+    assert len(mgr.reranker.calls) == 3  # 5 docs at batch_size=2 -> 2+2+1
+    assert set(scores) == {0, 1, 2, 3, 4}
+    assert sorted(positions) == list(range(5))
+    assert not warnings
+
+    # A scorer that drops the last doc of each batch -> unscored tail, no crash.
+    mgr.reranker.scorer = lambda docs: [(i, 1.0) for i in range(len(docs) - 1)]
+    warnings = []
+    positions, scores = await mgr._rerank_pool("rr", "q", [R(i) for i in range(4)], warnings)
+    assert scores == {0: 1.0, 2: 1.0}  # batch-local indices mapped to global positions
+    assert positions == [0, 2, 1, 3]  # scored desc, then unscored in order
+
+
+async def test_status_health_reports_reranker(rerank_env):
+    mgr, *_ = rerank_env
+    st = await mgr.status({"health": True})
+    assert st["health"]["reranker"] is True
+    mgr.reranker.fail = True
+    st = await mgr.status({"health": True})
+    assert st["health"]["reranker"] is False

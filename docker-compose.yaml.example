@@ -1,13 +1,14 @@
-# hulibaza MVP local stack. Own ports/volumes/creds so it never collides with
-# the prototype (5993x) or anything already on 5432.
+# hulibaza stack: Postgres + Qdrant + GPU embedder/reranker + MCP server.
 #
-#   Postgres  -> localhost:59942   (user/pass/db = hulibaza)
-#   Qdrant    -> localhost:59943   (REST/gRPC 6333)
-#   llama     -> localhost:59944   (optional, GPU; start only when you have models)
+#   cp docker-compose.yaml.example docker-compose.yaml
+#   # point ./YOUR_KNOWLEDGE_BASE at your docs directory, then:
+#   docker compose up -d postgres qdrant
+#   docker compose up -d llama-server   # local embedder + reranker (optional)
+#   docker compose up -d hulibaza       # builds the image; MCP on :59980
 #
-# Bring up the data stores:   docker compose up -d postgres qdrant
+# Ports: PG 59942, Qdrant 59943, llama 59944, MCP 59980.
 
-name: hulibaza-mvp
+name: hulibaza
 
 services:
   qdrant:
@@ -17,8 +18,7 @@ services:
       - "59943:6333"
     volumes:
       - ./qdrant_data:/qdrant/storage
-    # Qdrant + RocksDB open many files per segment; the 1024 default causes
-    # "Too many open files" as collections grow.
+    # Qdrant/RocksDB open many files per segment; the 1024 default breaks.
     ulimits:
       nofile:
         soft: 65536
@@ -46,20 +46,17 @@ services:
       timeout: 3s
       retries: 5
 
-  # The hulibaza MCP server (streamable-HTTP). Needs a reachable embedder, so it
-  # is behind the "server" profile — start it with:
-  #   docker compose --profile server up -d hulibaza
-  # after config.yaml, ./tokenizers/, and a wiki dir are in place.
+  # MCP server (streamable-HTTP). Needs config.yaml, ./tokenizers/, and the
+  # knowledge base at wiki_dir.
   hulibaza:
     build: .
     restart: unless-stopped
-#     profiles: ["server"]
     ports:
       - "59980:8080"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./tokenizers:/app/tokenizers:ro
-      - ./wiki:/data/docs:ro            # each subdir with a section.yaml = a section
+      - ./YOUR_KNOWLEDGE_BASE:/data/docs:ro   # <-- your docs directory
     environment:
       - CONFIG_PATH=/app/config.yaml
     depends_on:
@@ -68,14 +65,13 @@ services:
       qdrant:
         condition: service_healthy
 
-  # Embedding server: multi-model llama.cpp router (OpenAI-compatible
-  # /v1/embeddings). GPU + local model files required, so it is NOT started by
-  # default. Provide ./llama_server/models + models.ini and start it explicitly
-  # (docker compose up -d llama-server) once you have models on disk.
+  # Embedding + rerank: multi-model llama.cpp router (OpenAI-compatible).
+  # Needs ./llama_server/models + models.ini (scripts/fetch-models.sh).
+  # Pinned: b10818 is the first CUDA build with native Qwen3 rank-pooling
+  # (ggml-org #25447); don't float the tag.
   llama-server:
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda12-b9294
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda12-b10818
     restart: unless-stopped
-#     profiles: ["gpu"]           # excluded from the default `up`
     ports:
       - "59944:8080"
     volumes:

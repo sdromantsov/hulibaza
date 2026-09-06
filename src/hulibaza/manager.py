@@ -1,9 +1,10 @@
 """Serving orchestration: retrieval, navigation, ingest task registry, status.
 
-Holds the shared clients (config, embedder, Qdrant, Postgres, ingestor) and
-applies the two consistency gates (gates.py) on every search. Ingest runs as a
-background asyncio task tracked in an in-memory run registry (the run-level
-status pending|running|completed|failed lives here, not in Postgres).
+Holds the shared clients (config, embedder, reranker, Qdrant, Postgres,
+ingestor) and applies the two consistency gates (gates.py) on every search.
+When a reranker is configured, search retrieves the pool floor, reranks it,
+and returns top_k with relevance_score. Ingest runs as a background asyncio
+task tracked in an in-memory run registry.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from hulibaza.files import discover_files
 from hulibaza.gates import check_completeness, check_validity
 from hulibaza.health import ModelHealthRegistry
 from hulibaza.ingest import Ingestor
+from hulibaza.rerank_client import RerankClient, RerankError
 from hulibaza.sparse import build_sparse_vector
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,7 @@ class HulibazaManager:
         *,
         now: Callable[[], float] = time.time,
         health: ModelHealthRegistry | None = None,
+        reranker: RerankClient | None = None,
     ) -> None:
         self.config = config
         self.embedder = embedder
@@ -60,6 +63,8 @@ class HulibazaManager:
         self.get_token_counter = get_token_counter
         self._now = now
         self.health = health or ModelHealthRegistry(embedder, now=now)
+        # Reranker is query-time only; None disables reranking.
+        self.reranker = reranker
         self._runs: dict[str, RunInfo] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._orphan_task: asyncio.Task | None = None
@@ -194,10 +199,15 @@ class HulibazaManager:
                 }
             warnings.append(f"incomplete index ({completeness.summary()}); searching in_use subset")
 
+        # Reranking: when configured, retrieve the pool floor instead of
+        # top_k, rerank the whole pool, then cut to top_k.
+        rerank_name = self.config.defaults.reranker if self.reranker is not None else None
+        pool = max(top_k, self.config.defaults.rerank_pool_size) if rerank_name else top_k
+
         # Execute. Keyword needs no embedder; dense modes embed the query.
         sparse = build_sparse_vector(query)
         if mode == "keyword":
-            results = await self.qdrant.keyword_search(section.name, sparse, limit=top_k)
+            results = await self.qdrant.keyword_search(section.name, sparse, limit=pool)
         else:
             if not self.health.is_usable(section.embed_model):
                 h = self.health.get(section.embed_model)
@@ -218,28 +228,71 @@ class HulibazaManager:
                 }
             self.health.mark_healthy(section.embed_model, len(dense))
             if mode == "semantic":
-                results = await self.qdrant.semantic_search(section.name, dense, limit=top_k)
+                results = await self.qdrant.semantic_search(section.name, dense, limit=pool)
             else:
-                results = await self.qdrant.hybrid_search(section.name, dense, sparse, limit=top_k)
+                results = await self.qdrant.hybrid_search(section.name, dense, sparse, limit=pool)
 
+        # Rerank the pool; any failure degrades to retrieval order (never blocks).
+        positions = list(range(len(results)))
+        relevance: dict[int, float] = {}
+        if rerank_name and results:
+            positions, relevance = await self._rerank_pool(
+                rerank_name, query, results, warnings
+            )
+
+        top_positions = positions[:top_k]
         response = {
             "section": section_name,
             "query": query,
             "mode": mode,
             "results": [
                 {
-                    "text": r.text,
-                    "source_file": r.source_file,
-                    "page_number": r.page_number,
-                    "chunk_index": r.chunk_index,
-                    "score": r.score,
+                    "text": results[i].text,
+                    "source_file": results[i].source_file,
+                    "page_number": results[i].page_number,
+                    "chunk_index": results[i].chunk_index,
+                    "score": results[i].score,
+                    "relevance_score": relevance.get(i),
                 }
-                for r in results
+                for i in top_positions
             ],
         }
         if warnings:
             response["warnings"] = warnings
         return response
+
+    async def _rerank_pool(
+        self,
+        name: str,
+        query: str,
+        results: list,
+        warnings: list[str],
+    ) -> tuple[list[int], dict[int, float]]:
+        """Score the retrieval pool with the reranker.
+
+        Returns (ordered positions, {position: relevance_score}). Any failure
+        — server down, timeout, HTTP error, model not listed — degrades to
+        retrieval order + a warning; search never blocks on the reranker.
+        """
+        spec = self.config.rerankers[name]
+        try:
+            if not await self.reranker.is_model_available(name):
+                raise RerankError(f"model '{name}' not listed by the rerank server")
+            scores: dict[int, float] = {}
+            for start in range(0, len(results), spec.batch_size):
+                batch = results[start : start + spec.batch_size]
+                pairs = await self.reranker.rerank(name, query, [r.text for r in batch])
+                for pos, score in pairs:
+                    scores[start + pos] = score
+        except RerankError as e:
+            logger.warning("Reranking with '%s' failed: %s", name, e)
+            warnings.append(
+                f"reranking with '{name}' failed ({e}); returning retrieval order"
+            )
+            return list(range(len(results))), {}
+        ordered = sorted(scores, key=scores.get, reverse=True)
+        unscored = [i for i in range(len(results)) if i not in scores]
+        return ordered + unscored, scores
 
     async def list_files(self, section_name: str) -> dict:
         section, err = await self._queryable(section_name)
@@ -369,6 +422,7 @@ class HulibazaManager:
         if want("health"):
             out["health"] = {
                 "embedder": await self.embedder.health_check(),
+                "reranker": await self.reranker.health_check() if self.reranker else None,
                 "qdrant": await self.qdrant.health_check(),
                 "postgres": await self.state.health_check(),
             }

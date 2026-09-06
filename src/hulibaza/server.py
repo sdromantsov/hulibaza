@@ -11,7 +11,7 @@ import logging
 import sys
 from collections.abc import AsyncIterator
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from hulibaza.config import load_global_config
 from hulibaza.daemon import Daemon
@@ -20,6 +20,7 @@ from hulibaza.ingest import Ingestor
 from hulibaza.local_tokenizer import TokenizerRegistry
 from hulibaza.manager import HulibazaManager
 from hulibaza.qdrant_store import QdrantStore
+from hulibaza.rerank_client import RerankClient
 from hulibaza.state import StateStore
 
 logging.basicConfig(
@@ -48,7 +49,9 @@ Search returns only current (in_use) chunks and applies two gates, both raised
 as errors: validity (embedding params changed since indexing -> dense blocked,
 keyword still works) and completeness (pending/changed/in-progress files -> all
 modes blocked unless allow_incomplete=true). Keyword also works with the
-embedder down.
+embedder down. When a reranker is configured, results are re-scored: trust
+relevance_score (null when reranking was skipped or failed — a failure degrades
+to retrieval order and shows up in warnings).
 
 Query style — terms not questions: "cudaMalloc", "PoolManager singleton"; not
 "how does CUDA allocate memory".
@@ -60,6 +63,7 @@ _manager: HulibazaManager | None = None
 async def build_manager() -> HulibazaManager:
     config = load_global_config()
     embedder = EmbeddingClient(config.embedding_url, timeout=config.embedding_timeout)
+    reranker = RerankClient(config.embedding_url, timeout=config.embedding_timeout)
     qdrant = QdrantStore(config.qdrant_url)
     state = StateStore(config.postgres_url)
     await state.init_schema()
@@ -68,16 +72,27 @@ async def build_manager() -> HulibazaManager:
     return HulibazaManager(
         config, embedder, qdrant, state, ingestor,
         get_token_counter=lambda model: tokenizers.get(model).count,
+        reranker=reranker,
     )
 
 
 @contextlib.asynccontextmanager
-async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
+async def _lifespan(_server: MCPServer) -> AsyncIterator[None]:
     """Build the manager and start the background daemon at startup; stop it and
     close clients at shutdown. Ingestion is never auto-started."""
     global _manager
     _manager = await build_manager()
     logger.info("HulibazaManager initialized")
+
+    if not _manager.sections()["sections"]:
+        logger.warning(
+            "No sections found under wiki_dir=%s (a section is a subdirectory "
+            "with a section.yaml). First run? In docker-compose.yaml, replace "
+            "the knowledge-base mount placeholder ./YOUR_KNOWLEDGE_BASE (see "
+            "docker-compose.yaml.example) with the path to your docs "
+            "directory, then call ingest.",
+            _manager.config.wiki_dir,
+        )
 
     # Check every declared model up front, then recheck unhealthy ones.
     await _manager.health.check_all(_manager.config.models)
@@ -101,10 +116,13 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
                 await task
         with contextlib.suppress(Exception):
             await _manager.embedder.aclose()
+        with contextlib.suppress(Exception):
+            if _manager.reranker is not None:
+                await _manager.reranker.aclose()
 
 
-mcp = FastMCP(
-    "hulibaza", instructions=SERVER_INSTRUCTIONS, host="0.0.0.0", port=8080, lifespan=_lifespan
+mcp = MCPServer(
+    "hulibaza", instructions=SERVER_INSTRUCTIONS, lifespan=_lifespan
 )
 
 
@@ -145,8 +163,11 @@ async def search(
     """Retrieve top-k chunks. `query` = topic/term/phrase, not a sentence. mode:
     hybrid | semantic | keyword (see server instructions for modes + the
     validity/completeness gates; allow_incomplete=true lifts completeness only).
-    Returns {section, query, mode, results:[{text, source_file, page_number,
-    chunk_index, score}], warnings?} or {error}."""
+    Results are reranked when a reranker is configured: the retrieval pool is
+    re-scored and top_k is ordered by relevance_score (null when not reranked;
+    a rerank failure degrades to retrieval order with a warning). Returns
+    {section, query, mode, results:[{text, source_file, page_number,
+    chunk_index, score, relevance_score}], warnings?} or {error}."""
     return await (await _get_manager()).search(
         section, query, top_k=top_k, mode=mode, allow_incomplete=allow_incomplete
     )
@@ -188,12 +209,13 @@ async def status(filters: dict | None = None) -> dict:
         errors:[{file, reason}], skipped:[{file, status}], marked_for_deletion}]
       "models":[names] (or [] = all) -> [{model, status
         (unknown|checking|healthy|unhealthy), embedding_dim, error}]
-      "health": any value -> {embedder, qdrant, postgres} booleans"""
+      "health": any value -> {embedder, reranker (null if none configured),
+        qdrant, postgres} booleans"""
     return await (await _get_manager()).status(filters=filters)
 
 
 def main() -> None:
-    mcp.run(transport="streamable-http")
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=8080)
 
 
 if __name__ == "__main__":

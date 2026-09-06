@@ -1,15 +1,18 @@
 """Configuration loading & validation via Pydantic v2.
 
 One global `config.yaml` (path via CONFIG_PATH) declares infra URLs, the model
-registry, defaults, and the global knobs (size caps, deletion grace, daemon).
-Each section overrides `defaults` through its own `section.yaml`. Resolution
-produces a frozen ResolvedSectionConfig per section.
+and reranker registries, defaults, and the global knobs (size caps, deletion
+grace, daemon). Each section overrides `defaults` through its own
+`section.yaml`. Resolution produces a frozen ResolvedSectionConfig per section.
+
+Rerankers are query-time only: they reorder the retrieval pool after Qdrant
+search and never touch stored vectors, so they carry no max_context or
+tokenizer and changing them never forces re-ingest.
 
 Validity gate: a section whose resolved config is invalid — unknown
 embed_model, or chunk_size beyond the model's effective capacity — is NOT
 dropped; it carries a `disabled_reason` and is listed but refused for
-ingest/search. Bad GLOBAL defaults, by contrast, are a hard startup failure
-.
+ingest/search. Bad GLOBAL defaults, by contrast, are a hard startup failure.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -44,10 +47,29 @@ class ModelSpec(BaseModel):
         return v
 
 
+class RerankerSpec(BaseModel):
+    """One declared reranker: scoring backend kind + per-request batch size.
+
+    Query-time only: no max_context, no local tokenizer — documents arrive
+    pre-chunked and batches are per-document, not per-token.
+    """
+
+    kind: Literal["endpoint", "judge"] = Field(
+        default="endpoint",
+        description="'endpoint' = native /v1/rerank (Jina format); 'judge' = generic "
+        "causal-LM judge (reserved, not yet implemented).",
+    )
+    batch_size: int = Field(default=16, ge=1, le=256)
+
+
 class Defaults(BaseModel):
     """Global defaults a section may override via section.yaml."""
 
-    embed_model: str = "nomic-embed-text"
+    embed_model: str = "embeddinggemma-300m"
+    # Active reranker (registry name) or None -> reranking disabled.
+    reranker: Optional[str] = None
+    # Retrieval pool floor: search retrieves max(top_k, rerank_pool_size).
+    rerank_pool_size: int = Field(default=20, ge=1, le=512)
     chunk_size: int = Field(default=512, ge=32, le=32768)
     # Overlap as a fraction of chunk_size (0.1 = 10%).
     chunk_overlap_ratio: float = Field(default=0.1, ge=0.0, lt=1.0)
@@ -75,6 +97,7 @@ class GlobalConfig(BaseModel):
     daemon_poll_seconds: int = Field(default=60, ge=5, le=86400)
 
     models: dict[str, ModelSpec] = Field(default_factory=dict)
+    rerankers: dict[str, RerankerSpec] = Field(default_factory=dict)
     defaults: Defaults = Field(default_factory=Defaults)
 
     @field_validator("wiki_dir")
@@ -83,23 +106,28 @@ class GlobalConfig(BaseModel):
         return str(Path(v).resolve())
 
     @model_validator(mode="after")
-    def validate_defaults_against_models(self) -> "GlobalConfig":
-        # An empty registry skips validation (bootstrap / tests). With a
-        # registry present, the global defaults must themselves be valid.
-        if not self.models:
-            return self
-        if self.defaults.embed_model not in self.models:
+    def validate_defaults(self) -> "GlobalConfig":
+        # An empty registry skips embed-model validation (bootstrap / tests).
+        # With a registry present, the global defaults must themselves be valid.
+        if self.models:
+            if self.defaults.embed_model not in self.models:
+                raise ValueError(
+                    f"defaults.embed_model '{self.defaults.embed_model}' not declared in "
+                    f"models registry. Available: {sorted(self.models.keys())}"
+                )
+            spec = self.models[self.defaults.embed_model]
+            effective_max = int(spec.max_context * (1 - self.defaults.headroom_ratio))
+            if self.defaults.chunk_size > effective_max:
+                raise ValueError(
+                    f"defaults.chunk_size ({self.defaults.chunk_size}) exceeds effective max "
+                    f"({effective_max} = max_context {spec.max_context} × "
+                    f"(1 − headroom_ratio {self.defaults.headroom_ratio}))"
+                )
+        # A configured default reranker must exist in the registry.
+        if self.defaults.reranker is not None and self.defaults.reranker not in self.rerankers:
             raise ValueError(
-                f"defaults.embed_model '{self.defaults.embed_model}' not declared in "
-                f"models registry. Available: {sorted(self.models.keys())}"
-            )
-        spec = self.models[self.defaults.embed_model]
-        effective_max = int(spec.max_context * (1 - self.defaults.headroom_ratio))
-        if self.defaults.chunk_size > effective_max:
-            raise ValueError(
-                f"defaults.chunk_size ({self.defaults.chunk_size}) exceeds effective max "
-                f"({effective_max} = max_context {spec.max_context} × "
-                f"(1 − headroom_ratio {self.defaults.headroom_ratio}))"
+                f"defaults.reranker '{self.defaults.reranker}' not declared in "
+                f"rerankers registry. Available: {sorted(self.rerankers.keys())}"
             )
         return self
 

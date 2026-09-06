@@ -1,129 +1,84 @@
 # hulibaza
 
-**Self-hosted, grounded-retrieval MCP server.** hulibaza indexes your document
-collections and serves *ranked source passages with provenance* to an LLM over
-the [Model Context Protocol](https://modelcontextprotocol.io). It **retrieves,
-it does not generate** — the model composes the answer from real, cited chunks.
+Self-hosted knowledge-base management over the
+[Model Context Protocol](https://modelcontextprotocol.io). Point it at the
+document folders you already keep on disk — each collection is one directory
+with a small `section.yaml` — and your LLM client can ingest them and get back
+**ranked source passages with provenance**. hulibaza retrieves, it does not
+generate: the model composes the answer from real, cited chunks.
 
-## Why
+## Why it's built this way
 
-- **Grounded, not generative.** Every hit is an exact passage with
-  `source_file` + `page_number` + `chunk_index`. No summarization step, no
-  hallucination surface — just retrieval.
-- **Self-hosted, no data egress.** Your documents, Postgres, Qdrant, and the
-  embedder all run locally. Nothing leaves the box.
-- **Hybrid retrieval.** Dense semantic vectors *and* sparse keyword vectors,
-  fused with Reciprocal Rank Fusion — exact identifiers and meaning both land.
-- **Correct under failure.** Per-batch write-ahead checkpointing: a file
-  committed as indexed always has its vectors. Crash or reboot mid-ingest →
-  resume from exactly where it stopped, no corruption.
-- **Honest by construction.** Consistency gates block (or clearly warn on)
-  retrieval when the index is stale, mid-ingest, or the embedding params
-  changed. You never silently search an inconsistent index.
+- **Grounded.** Every hit is an exact passage with `source_file` + `page` +
+  `chunk`. No summarizer, no hallucination surface.
+- **Your tools, your files.** Sections are plain directories plus one YAML
+  file — the same layout you'd keep by hand. Optional `.hulibazaignore` /
+  `.hulibazaallow` (gitignore-style globs) control what gets indexed.
+- **Self-hosted.** Docs, Postgres, Qdrant and the embedder all run on your
+  box. Nothing leaves it.
+- **Hybrid retrieval.** Dense + sparse vectors fused (RRF), so exact
+  identifiers and meaning both land; an optional reranker re-orders the final
+  pool.
+- **Honest index.** Every section and file is fingerprinted in Postgres. If
+  embedding params changed, files are mid-ingest, or the index is stale,
+  search is blocked or clearly warns — you never silently search an
+  inconsistent index.
 
-## Architecture
+## Deploy & configuration
+
+Prereqs: Docker + Compose. A GPU is recommended for the local embedder — or
+point `embedding_url` at any OpenAI-compatible endpoint and skip it.
+
+```bash
+git clone <repo> && cd hulibaza
+./scripts/fetch-models.sh     # weights + tokenizers, checksum-verified
+cp config.example.yaml config.yaml
+cp docker-compose.yaml.example docker-compose.yaml
+docker compose up -d postgres qdrant
+docker compose up -d llama-server   # local embedder + reranker (optional)
+docker compose up -d hulibaza       # builds the image; MCP on :59980
+```
+
+The only thing you adjust for your own knowledge base: replace the
+`./YOUR_KNOWLEDGE_BASE` placeholder in `docker-compose.yaml` with the path to
+your docs directory (it mounts to `/data/docs`), and set `wiki_dir` in
+`config.yaml` to match. On a first start with no sections the server logs this
+for you. Each subdirectory with a `section.yaml` becomes a section:
 
 ```
-              MCP client (LLM)
-                    │  streamable-HTTP  :59980
-              ┌─────▼──────┐
-              │  hulibaza  │   FastMCP — discovery · ingest · retrieval · lifecycle
-              └──┬──────┬──┘
-          search │      │ state
-          ┌──────▼─┐  ┌─▼───────┐          embeddings
-          │ Qdrant │  │Postgres │      ┌──────────────┐
-          │ hybrid │  │  state  │      │   embedder   │  /v1/embeddings
-          └────────┘  └─────────┘      └──────────────┘
-```
-
-- **hulibaza server** — [FastMCP](https://modelcontextprotocol.io) over
-  streamable-HTTP. Section discovery, ingestion, retrieval, and the background
-  lifecycle daemon.
-- **Qdrant** — vector store. Named vectors `semantic` (dense, cosine) +
-  `keywords` (sparse, IDF-weighted). Deterministic point IDs make re-ingest
-  idempotent.
-- **Postgres** — authoritative state: per-section + per-file tracking, WAL
-  checkpoints, soft-delete tombstones.
-- **Embedder** — any OpenAI-compatible `/v1/embeddings` endpoint. Ships with a
-  [llama.cpp](https://github.com/ggml-org/llama.cpp) multi-model router config,
-  but you can point `embedding_url` anywhere.
-
-## Quickstart
-
-Prereqs: Docker + Compose. A GPU is recommended for a local embedder, or point
-`embedding_url` at any hosted OpenAI-compatible embeddings API.
-
-1. **Config** — `cp config.example.yaml config.yaml`, edit the model registry.
-2. **Models + tokenizers** — `./scripts/fetch-models.sh` downloads the GGUF
-   weights (`./llama_server/models/`) and the `tokenizer.json` files
-   (`./tokenizers/`, used for local token counting) from their official
-   HuggingFace repos, checksum-verified. Not committed — they exceed GitHub's
-   size limit. Provenance + licenses: [docs/MODELS.md](docs/MODELS.md). To use a
-   remote embedder instead, point `embedding_url` at any OpenAI-compatible
-   `/v1/embeddings` endpoint and skip the `gpu` profile below.
-3. **Sections** — put document collections under `./wiki/<name>/`, each with a
-   `section.yaml`.
-4. **Run:**
-   ```bash
-   docker compose up -d postgres qdrant
-   docker compose --profile gpu up -d llama-server     # local embedder (optional)
-   docker compose --profile server up -d hulibaza      # MCP server on :59980
-   ```
-5. Point your MCP client at `http://localhost:59980/mcp`, `ingest()` a section,
-   then `search()` it.
-
-Full deploy notes: [docs/RUNNING.md](docs/RUNNING.md).
-
-## A section
-
-```
-wiki/cuda/
-  section.yaml          # description + embed_model + chunk_size
+wiki_dir/cuda/
+  section.yaml        # description + embed_model + chunk_size
   guide.pdf
   api/reference.md
 ```
-```yaml
-# section.yaml
-description: NVIDIA CUDA documentation
-embed_model: qwen3-embed-4b
-chunk_size: 1024
-```
-Optional per-section `.hulibazaignore` / `.hulibazaallow` (gitignore-style
-globs) extend the shipped defaults for what gets indexed. PDFs are parsed
-page-aware; text files are chunked structure-aware (code blocks kept intact).
 
-## MCP tools
+PDFs are parsed page-aware; text is chunked structure-aware (code blocks stay
+intact). Model provenance + licenses: [docs/MODELS.md](docs/MODELS.md). Full
+operating notes: [docs/RUNNING.md](docs/RUNNING.md).
 
-| Tool | Purpose |
+Then point your MCP client at `http://localhost:59980/mcp`, call
+`ingest("all")`, and `search()`.
+
+## API (MCP tools)
+
+| Tool | What it does |
 |---|---|
-| `sections()` | List collections + which are usable. |
-| `search(section, query, mode, ...)` | Ranked chunks. `mode`: `hybrid` \| `semantic` \| `keyword`. |
-| `section_details(section)` | Config + ingestion coverage. |
-| `list_files` / `get_chunks` | Navigate a section's files and chunks. |
-| `ingest(section)` | Index a section — background, incremental, resumable. |
-| `status(filters)` | Run state, per-file errors/skips, model + backend health. |
+| `sections()` | List collections + which are usable |
+| `ingest(section)` | Index a section — background, incremental, resumable |
+| `search(section, query, mode)` | Ranked chunks; `hybrid` \| `semantic` \| `keyword` |
+| `section_details(section)` | Config + ingestion coverage |
+| `list_files` / `get_chunks` | Navigate a section's files and chunks |
+| `status()` | Ingest runs, per-file errors/skips, backend health |
 
-## How retrieval stays honest
+## Internal state
 
-Two gates protect every search:
-
-- **Validity** — if a section's embedding parameters changed since it was
-  indexed, dense modes are blocked; `keyword` still works (it needs no
-  embedder).
-- **Completeness** — if any file is pending, changed, or mid-ingest, all modes
-  are blocked unless you pass `allow_incomplete=true`, which returns the indexed
-  subset plus a warning.
-
-## Development
-
-```bash
-pip install -e .
-docker compose up -d postgres      # integration tests use a real Postgres
-pytest                             # Qdrant runs in-memory; the embedder is faked
-```
-
-Design docs — requirements (FR/NFR), the decision record, and schema diagrams —
-live in [docs/](docs/).
+Postgres is the authority. Each **section** row stores its embedding
+fingerprint (model, chunk size, overlap); each **file** row stores content
+hash, size, mtime and a per-batch checkpoint. That's what makes ingest
+incremental (untouched files skip), resumable (crash mid-ingest → continue
+from the last committed batch), and lets the search gates detect parameter
+drift and stale indexes. Deleted files become 7-day tombstones before their
+vectors are purged.
 
 ## License
 

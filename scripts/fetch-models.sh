@@ -3,8 +3,8 @@
 # Fetch the embedding models + tokenizers hulibaza needs.
 #
 # These files are intentionally NOT committed: the GGUF weights are far larger
-# than GitHub's 100 MB limit, and every file here is Apache-2.0 and freely
-# available from its official HuggingFace repo. This script pulls each one into
+# than GitHub's 100 MB limit, and every file here is freely available from its
+# official HuggingFace repo. This script pulls each one into
 # the exact path config.yaml / llama_server/models.ini expect, and verifies its
 # sha256. Re-runnable: existing, correct files are skipped.
 #
@@ -20,10 +20,9 @@ mkdir -p "$MODELS" "$TOKS"
 
 # dest | huggingface repo | path-in-repo | sha256
 ENTRIES=(
-  "$MODELS/nomic-embed-text-v2-moe.Q4_K_S.gguf|nomic-ai/nomic-embed-text-v2-moe-GGUF|nomic-embed-text-v2-moe.Q4_K_S.gguf|db0608a87a2daf4a52b74912dd678ca6122db26d971bdfcf16d3b11b77047663"
-  "$MODELS/Qwen3-Embedding-4B-Q4_K_M.gguf|Qwen/Qwen3-Embedding-4B-GGUF|Qwen3-Embedding-4B-Q4_K_M.gguf|2b0cf8f17b4c723c27303015383c27ec4bf2d8314bb677d05e920dd70bb0f16b"
-  "$TOKS/nomic-v2-moe.json|nomic-ai/nomic-embed-text-v2-moe|tokenizer.json|3a56def25aa40facc030ea8b0b87f3688e4b3c39eb8b45d5702b3a1300fe2a20"
-  "$TOKS/qwen3-embed-4b.json|Qwen/Qwen3-Embedding-4B|tokenizer.json|83cdf8c3a34f68862319cb1810ee7b1e2c0a44e0864ae930194ddb76bb7feb8d"
+  "$MODELS/embeddinggemma-300M-Q8_0.gguf|unsloth/embeddinggemma-300m-GGUF|embeddinggemma-300M-Q8_0.gguf|a0f7b4e13c397a6e1b32c2de75b1f65a14c92ec524d5f674d94a4290a1c4969b"
+  "$MODELS/qwen3-reranker-0.6b-q8_0.gguf|ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF|qwen3-reranker-0.6b-q8_0.gguf|22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48"
+  "$TOKS/embeddinggemma-300m.json|unsloth/embeddinggemma-300m|tokenizer.json|6852f8d561078cc0cebe70ca03c5bfdd0d60a45f9d2e0e1e4cc05b68e9ec329e"
 )
 
 verify() { echo "$2  $1" | sha256sum -c --status; }

@@ -1,0 +1,53 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+
+# Local runtime config (copy from config.example.yaml, then edit)
+config.yaml
+
+# Local compose (machine-specific); tracked template: docker-compose.yaml.example
+docker-compose.yaml
+
+# Working docs (kept out of the repo)
+docs/FUNCTIONAL_REQUIREMENTS.md
+docs/NON_FUNCTIONAL_REQUIREMENTS.md
+docs/OPEN_QUESTIONS.md
+docs/README.md
+docs/USER_STORIES.md
+docs/VISION_AND_SCOPE.md
+docs/diagrams/
+
+# Data / state volumes — never commit
+pg_data/
+qdrant_data/
+ollama_data/
+wiki/
+
+# Local embedder assets: model weights (GBs) + tokenizers. User-provided.
+llama_server/
+tokenizers/
+*.gguf
+
+# Secrets / env
+.env
+*.pem
+*.key
+
+# Archives / export artifacts
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

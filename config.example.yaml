@@ -22,17 +22,23 @@ daemon_poll_seconds: 60
 # counts are computed locally — no HTTP tokenization). A section.yaml may only
 # reference a model declared here. embed_batch_size is per-model (VRAM-bound).
 models:
-  qwen3-embed-4b:
-    max_context: 2048
-    tokenizer_path: /app/tokenizers/qwen3-embed-4b.json
-    embed_batch_size: 16
-  nomic-v2-moe:
-    max_context: 512
-    tokenizer_path: /app/tokenizers/nomic-v2-moe.json
+  embeddinggemma-300m:
+    max_context: 768
+    tokenizer_path: /app/tokenizers/embeddinggemma-300m.json
     embed_batch_size: 32
 
+# Reranker registry (query-time only). kind: endpoint = native
+# /v1/rerank (Jina format); batch_size = documents per request (VRAM-bound).
+# Rerankers need no local tokenizer.
+rerankers:
+  qwen3-reranker-0.6b:
+    kind: endpoint
+    batch_size: 32
+
 defaults:
-  embed_model: "nomic-v2-moe"
+  embed_model: "embeddinggemma-300m"
+  reranker: "qwen3-reranker-0.6b"  # omit or null to disable reranking
+  rerank_pool_size: 20             # retrieve max(top_k, this), rerank, return top_k
   chunk_size: 500                 # tokens; must be <= max_context × (1 − headroom)
   chunk_overlap_ratio: 0.1
   headroom_ratio: 0.02
